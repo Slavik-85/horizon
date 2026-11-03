@@ -1,10 +1,10 @@
 //! OptiFine custom entity models over Horizon's mob model layers: `optifine/cem/<name>.jem` (or
 //! `cem/<name>/<name>.jem`, and Entity Model Features' `emf/cem/`, which wins) maps to one layer
-//! (`zombie.jem` to `zombie#main`, `sheep_wool.jem` to `sheep#wool`), its parts to the layer's
-//! vanilla parts, and its boxes join or replace theirs. A layer without its own model takes the
-//! one it falls back to: a baby's adult (OptiFine's fallbacks, and Entity Model Features' for
-//! horses too), and the few of [`FALLBACKS`], following their chains (`cat_baby_collar` to
-//! `cat_collar` to `cat`).
+//! (`zombie.jem` to `zombie#main`, `sheep_wool.jem` to `sheep#wool`, `zombie_helmet.jem` to the
+//! worn helmet's `zombie#helmet`), its parts to the layer's vanilla parts, and its boxes join or
+//! replace theirs. A layer without its own model takes the one it falls back to: a baby's adult
+//! (OptiFine's fallbacks, and Entity Model Features' for horses too), and the few of
+//! [`FALLBACKS`], following their chains (`cat_baby_collar` to `cat_collar` to `cat`).
 //!
 //! Built when the packs load; a mob's draw only swaps the layer's part tree. Without CEM files
 //! nothing is built and every model stays vanilla's, and a file no layer uses isn't parsed.
@@ -354,9 +354,16 @@ fn layer_key(name: &str) -> String {
     }
     match LAYERS.iter().find(|(n, _)| *n == name) {
         Some((_, key)) => (*key).to_owned(),
-        None => format!("{name}#main"),
+        // A worn armour piece: Entity Model Features names `zombie#helmet` `zombie_helmet`.
+        None => match name.rsplit_once('_') {
+            Some((model, piece)) if ARMOR_PIECES.contains(&piece) => format!("{model}#{piece}"),
+            _ => format!("{name}#main"),
+        },
     }
 }
+
+/// The layers of a `HumanoidArmorLayer` (`zombie#helmet`), one per worn piece.
+const ARMOR_PIECES: [&str; 4] = ["helmet", "chestplate", "leggings", "boots"];
 
 /// The layer of a model layer key: `wool` of `sheep#wool`.
 fn layer_suffix(key: &str) -> &str {
@@ -527,9 +534,14 @@ fn vanilla_part(model: &str, part: &str) -> String {
         // (the fin animation in aquatic.rs).
         ("puffer_fish_big" | "puffer_fish_medium", "fin_right") => Some("right_blue_fin".into()),
         ("puffer_fish_big" | "puffer_fish_medium", "fin_left") => Some("left_blue_fin".into()),
-        // RabbitModel's hind feet (rabbit.rs).
-        ("rabbit", "left_foot") => Some("left_hind_foot".into()),
-        ("rabbit", "right_foot") => Some("right_hind_foot".into()),
+        // 26.1's rabbit legs (AdultRabbitModel, BabyRabbitModel), as Entity Model Features
+        // maps them: the foot is the haunch, the thigh the hind leg, the arm the front leg.
+        ("rabbit", "left_foot") => Some("left_haunch".into()),
+        ("rabbit", "right_foot") => Some("right_haunch".into()),
+        ("rabbit", "left_thigh") => Some("left_hind_leg".into()),
+        ("rabbit", "right_thigh") => Some("right_hind_leg".into()),
+        ("rabbit", "left_arm") => Some("left_front_leg".into()),
+        ("rabbit", "right_arm") => Some("right_front_leg".into()),
         (_, "fin_right") => Some("right_fin".into()),
         (_, "fin_left") => Some("left_fin".into()),
         (_, "fin_bottom") => Some("bottom_fin".into()),
@@ -742,6 +754,13 @@ mod tests {
             ("sheep_wool", "sheep#wool"),
             ("sheep_baby_wool", "sheep_baby#wool"),
             ("drowned_baby_outer", "drowned_baby#outer"),
+            ("zombie_helmet", "zombie#helmet"),
+            (
+                "zombie_villager_baby_leggings",
+                "zombie_villager_baby#leggings",
+            ),
+            ("piglin_boots_baby", "piglin_baby#boots"),
+            ("wither_skeleton_chestplate", "wither_skeleton#chestplate"),
             ("cold_chicken", "cold_chicken#main"),
             ("puffer_fish_big", "pufferfish_big#main"),
             ("tropical_fish_pattern_b", "tropical_fish_large#pattern"),
@@ -773,7 +792,9 @@ mod tests {
             ("squid", "tentacle0", "tentacle0"),
             ("puffer_fish_medium", "fin_left", "left_blue_fin"),
             ("puffer_fish_small", "fin_right", "right_fin"),
-            ("rabbit", "left_foot", "left_hind_foot"),
+            ("rabbit", "left_foot", "left_haunch"),
+            ("rabbit", "right_thigh", "right_hind_leg"),
+            ("rabbit", "left_arm", "left_front_leg"),
         ] {
             assert_eq!(vanilla_part(model, part), vanilla, "{model} {part}");
         }
@@ -931,6 +952,34 @@ mod tests {
         let models = models("baby", &files, &["zombie#main", "zombie_baby#main"], &tree);
         assert_eq!(attached(&models, "zombie#main", "head"), Some(false));
         assert_eq!(attached(&models, "zombie_baby#main", "head"), Some(true));
+    }
+
+    #[test]
+    fn worn_armour_pieces_take_their_own_files() {
+        let (replace, attach) = (jem("head", false), jem("body", true));
+        let files = [
+            ("optifine/cem/zombie_helmet.jem", replace.as_str()),
+            ("emf/cem/zombie_baby_leggings.jem", attach.as_str()),
+        ];
+        let tree = plane("root", vec![plane("head", vec![]), plane("body", vec![])]);
+        let layers = [
+            "zombie#main",
+            "zombie#helmet",
+            "zombie_baby#helmet",
+            "zombie#leggings",
+            "zombie_baby#leggings",
+        ];
+        let models = models("armour", &files, &layers, &tree);
+        assert_eq!(attached(&models, "zombie#helmet", "head"), Some(false));
+        // The baby's helmet has no file: the adult's, as a baby's model takes.
+        assert_eq!(attached(&models, "zombie_baby#helmet", "head"), Some(false));
+        assert_eq!(
+            attached(&models, "zombie_baby#leggings", "body"),
+            Some(true)
+        );
+        // Neither file is the body's, and the baby's leggings aren't the adult's.
+        assert!(models.layer("zombie#main").is_none());
+        assert!(models.layer("zombie#leggings").is_none());
     }
 
     #[test]
@@ -1277,10 +1326,12 @@ mod tests {
                 continue;
             };
             let adult_key = format!("{adult}#{layer}");
+            // `zombie_baby#helmet` is `zombie_baby_helmet`'s, of `zombie_helmet`.
+            let piece = format!("{adult}_{layer}");
             let reached = LAYERS
                 .iter()
                 .map(|(name, _)| *name)
-                .chain([adult])
+                .chain([adult, piece.as_str()])
                 .filter(|name| layer_key(name) == adult_key)
                 .flat_map(baby_names)
                 .any(|baby| layer_key(&baby) == *key);
@@ -1346,6 +1397,8 @@ mod tests {
             ("puffer_fish_big", "spikes_front_top"),
             ("rabbit", "left_foot"),
             ("rabbit", "right_foot"),
+            ("rabbit", "left_thigh"),
+            ("rabbit", "right_arm"),
             ("sniffer", "middle_left_leg"),
             ("strider", "hair_left_top"),
             ("horse", "neck"),
